@@ -1,27 +1,4 @@
-#include "WiFiManager.h"
-#include "NTPClient.h"
-#include "TM1637Display.h"
-#include "DFRobotDFPlayerMini.h"
-#include "AiEsp32RotaryEncoder.h"
-
-//========================USEFUL VARIABLES=============================
-uint16_t notification_volume = 15;
-int UTC = 2;               // UTC + value in hour - Summer time
-int Display_backlight = 3; // Set displays brightness 0 to 7;
-//=====================================================================
-
-#define ROTARY_ENCODER_A_PIN 25
-#define ROTARY_ENCODER_B_PIN 26
-#define ROTARY_ENCODER_BUTTON_PIN 27
-#define RED_LED 32
-#define WHITE_LED 33
-#define ROTARY_ENCODER_STEPS 4
-#define ROTARY_ENCODER_VCC_PIN -1
-
-const byte RXD2 = 16;                 // Connects to module's TX
-const byte TXD2 = 17;                 // Connects to module's RX
-const long utcOffsetInSeconds = 3600; // UTC + 1H / Offset in second
-bool res;
+#include <main.h>
 
 AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(
     ROTARY_ENCODER_A_PIN,
@@ -30,33 +7,30 @@ AiEsp32RotaryEncoder rotaryEncoder = AiEsp32RotaryEncoder(
     ROTARY_ENCODER_VCC_PIN,
     ROTARY_ENCODER_STEPS);
 
-void IRAM_ATTR readEncoderISR()
-{
-  rotaryEncoder.readEncoder_ISR();
-}
-
-#define FPSerial Serial1
 DFRobotDFPlayerMini myDFPlayer;
-void printDetail(uint8_t type, int value);
 
 float counter = 0;
 String currentDir = "";
 unsigned long lastButtonPress = 0;
-int btnState = 0;
 
-int secondes = 0;
+int timePassed = 60;
+int seconds = 0;
 int minutes = 0;
 float inc_red_led = 0;
 
 // Define NTP Client to get time
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", utcOffsetInSeconds *UTC);
+NTPClient timeClient(ntpUDP, ntpServer, utcOffsetInSeconds *UTC, intervalToUpdateTime);
+String lastUpdatedTime = "";
+
 TM1637Display red1(21, 22);
 
 void setup()
 {
   pinMode(RED_LED, OUTPUT);
   pinMode(WHITE_LED, OUTPUT);
+  pinMode(ROTARY_ENCODER_A_PIN, INPUT_PULLUP);
+  pinMode(ROTARY_ENCODER_B_PIN, INPUT_PULLUP);
   // configure LED PWM functionalitites
   ledcSetup(0, 5000, 8);
   // attach the channel to the GPIO to be controlled
@@ -64,16 +38,36 @@ void setup()
   red1.setBrightness(Display_backlight);
   Serial.begin(9600);
 
-  WiFiManager manager;
-
-  manager.setTimeout(180);
-  // fetches ssid and password and tries to connect, if connections succeeds it starts an access point with the name called "BTTF_CLOCK" and waits in a blocking loop for configuration
-  res = manager.autoConnect("R2D2", "landshover");
-  // manager.resetSettings();
-  if (!res)
+  if (strlen(ssid) > 0 && strlen(password) > 0)
   {
-    Serial.println("failed to connect and timeout occurred");
-    ESP.restart(); // reset and try again
+    WiFi.begin(ssid, password);
+
+    while (WiFi.status() != WL_CONNECTED)
+    {
+      delay(500);
+      Serial.print(".");
+    }
+  }
+  else
+  {
+    WiFiManager manager;
+
+    manager.setTimeout(180);
+    // fetches ssid and password and tries to connect, if connections succeeds it starts an access point with the name called "BTTF_CLOCK" and waits in a blocking loop for configuration
+    boolean res = manager.autoConnect(wifimanagerSSID, wifimanagerPASS);
+    // manager.resetSettings();
+    if (!res)
+    {
+      Serial.println("failed to connect and timeout occurred");
+      ESP.restart(); // reset and try again
+    }
+
+    IPAddress dnsIp = IPAddress();
+    dnsIp.fromString(dnsIpAddress);
+
+    WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(), dnsIp);
+    delay(10);
+    Serial.println(WiFi.dnsIP());
   }
 
   timeClient.begin();
@@ -95,51 +89,64 @@ void setup()
   }
   Serial.println(F("DFPlayer Mini online."));
 
-  myDFPlayer.volume(20); // Set volume value. From 0 to 30
+  myDFPlayer.volume(30); // Set volume value. From 0 to 30
   myDFPlayer.play(1);    // Play the first mp3
 
   Serial.println("\n Starting");
 
+  // using switch-like encoder.
+  rotaryEncoder.areEncoderPinsPulldownforEsp32 = areEncoderPinsPulldownforEsp32;
+
   rotaryEncoder.begin();
   rotaryEncoder.setup(readEncoderISR);
-  rotaryEncoder.setBoundaries(0, 3500, true); // minValue, maxValue, circleValues true|false (when max go to min and vice versa)
-  rotaryEncoder.setAcceleration(250);
+  rotaryEncoder.setBoundaries(0, 3500, false); // minValue, maxValue, circleValues true|false (when max go to min and vice versa)
+  rotaryEncoder.setAcceleration(60);
 }
 
 void loop()
 {
+  // the update happens only every 60 seconds controlled by intervalToUpdateTime variable
+  bool hasTimeUpdated;
+  if (hasTimeUpdated = timeClient.update())
+  {
+    lastUpdatedTime = timeClient.getFormattedTime();
+  }
 
-  timeClient.update();
   red1.showNumberDecEx(timeClient.getHours(), 0b01000000, true, 2, 0);
   red1.showNumberDecEx(timeClient.getMinutes(), 0b01000000, true, 2, 2);
 
-  Serial.print("Time: ");
-  Serial.println(timeClient.getFormattedTime());
   unsigned long epochTime = timeClient.getEpochTime();
   struct tm *ptm = gmtime((time_t *)&epochTime);
   int currentYear = ptm->tm_year + 1900;
-  Serial.print("Year: ");
-  Serial.println(currentYear);
 
   int monthDay = ptm->tm_mday;
-  Serial.print("Month day: ");
-  Serial.println(monthDay);
 
   int currentMonth = ptm->tm_mon + 1;
-  Serial.print("Month: ");
-  Serial.println(currentMonth);
+
+  if (hasTimeUpdated)
+  {
+    Serial.print("Last Updated Time: ");
+    Serial.println(lastUpdatedTime);
+    Serial.print("Time: ");
+    Serial.println(timeClient.getFormattedTime());
+    Serial.print("Year: ");
+    Serial.println(currentYear);
+    Serial.print("Month day: ");
+    Serial.println(monthDay);
+    Serial.print("Month: ");
+    Serial.println(currentMonth);
+  }
 
   if (myDFPlayer.available())
   {
-    printDetail(myDFPlayer.readType(), myDFPlayer.read()); // Print the detail message from DFPlayer to handle different errors and states.
+    printPlayerDetails(myDFPlayer.readType(), myDFPlayer.read()); // Print the detail message from DFPlayer to handle different errors and states.
   }
 
-  btnState = digitalRead(ROTARY_ENCODER_BUTTON_PIN);
   ledcWrite(0, inc_red_led);
   digitalWrite(WHITE_LED, LOW);
 
   // If we detect LOW signal, button is pressed
-  if (btnState == LOW)
+  if (rotaryEncoder.isEncoderButtonClicked())
   {
     // if 50ms have passed since last LOW pulse, it means that the
     // button has been pressed, released and pressed again
@@ -162,6 +169,8 @@ void loop()
     inc_red_led = 0;
   }
 
+  delay(1);
+
   if ((currentMonth * 30 + monthDay) >= 121 && (currentMonth * 30 + monthDay) < 331)
   {
     // Change daylight saving time - Summer - change 31/03 at 00:00
@@ -171,12 +180,16 @@ void loop()
   {
     timeClient.setTimeOffset((utcOffsetInSeconds * UTC) - 3600);
   } // Change daylight saving time - Winter - change 31/10 at 00:00
+}
 
-  delay(1000);
+void IRAM_ATTR readEncoderISR()
+{
+  rotaryEncoder.readEncoder_ISR();
 }
 
 void Setup_timer()
 {
+  Serial.println("Setup timer lesgooo:");
   red1.showNumberDecEx(88, 0b01000000, true, 2, 0);
   red1.showNumberDecEx(88, 0b01000000, true, 2, 2);
 
@@ -185,27 +198,28 @@ void Setup_timer()
   myDFPlayer.play(2);
   delay(500);
 
-  btnState = digitalRead(ROTARY_ENCODER_BUTTON_PIN);
-  while (digitalRead(ROTARY_ENCODER_BUTTON_PIN) == HIGH)
+  while (true)
   {
-
     if (rotaryEncoder.encoderChanged())
     {
       Serial.println(rotaryEncoder.readEncoder());
       counter = rotaryEncoder.readEncoder();
     }
+
+    minutes = counter / 60;
+    seconds = ((counter / 60) - minutes) * 60;
+    red1.showNumberDecEx(minutes, 0b01000000, true, 2, 0);
+    red1.showNumberDecEx(seconds, 0b01000000, true, 2, 2);
+
     if (rotaryEncoder.isEncoderButtonClicked())
     {
       Serial.println("button pressed");
+      break;
     }
-
-    minutes = counter / 60;
-    secondes = ((counter / 60) - minutes) * 60;
-    red1.showNumberDecEx(minutes, 0b01000000, true, 2, 0);
-    red1.showNumberDecEx(secondes, 0b01000000, true, 2, 2);
   }
+
   Countdown(counter);
-  Serial.println("Sortie de la boucle");
+  Serial.println("Loop exit");
 }
 
 void Countdown(float timer_counter)
@@ -213,19 +227,16 @@ void Countdown(float timer_counter)
   myDFPlayer.play(8);
 
   delay(1000);
-  btnState = digitalRead(ROTARY_ENCODER_BUTTON_PIN);
 
-  while (btnState == HIGH)
+  while (counter > 0)
   {
-    btnState = digitalRead(ROTARY_ENCODER_BUTTON_PIN);
     for (int i = 10; i > 0; i--)
     {
-
       timer_counter = timer_counter - 0.1;
       minutes = timer_counter / 60;
-      secondes = ((timer_counter / 60) - minutes) * 60;
+      seconds = ((timer_counter / 60) - minutes) * 60;
       red1.showNumberDecEx(minutes, 0b01000000, true, 2, 0);
-      red1.showNumberDecEx(secondes, 0b01000000, true, 2, 2);
+      red1.showNumberDecEx(seconds, 0b01000000, true, 2, 2);
       delay(70);
       digitalWrite(RED_LED, LOW);
     }
@@ -274,10 +285,12 @@ void Countdown(float timer_counter)
         waitMilliseconds(random(10, 150));
       }
 
-      btnState = LOW;
       counter = 0;
     };
   }
+
+  // easter egg music in my case the office song, just for fun.
+  myDFPlayer.play(9);
 }
 
 void waitMilliseconds(uint16_t msWait)
@@ -292,7 +305,7 @@ void waitMilliseconds(uint16_t msWait)
   }
 }
 
-void printDetail(uint8_t type, int value)
+void printPlayerDetails(uint8_t type, int value)
 {
   switch (type)
   {
